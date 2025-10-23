@@ -6,11 +6,14 @@
 (define-constant err-not-authorized (err u104))
 (define-constant err-invalid-proposal (err u105))
 (define-constant err-voting-not-started (err u106))
+(define-constant err-not-proposer (err u107))
+(define-constant err-too-many-amendments (err u108))
 
 (define-data-var proposal-counter uint u0)
 (define-data-var voting-duration uint u1440)
 (define-data-var min-votes-required uint u10)
 (define-data-var approval-threshold uint u60)
+(define-data-var max-amendments uint u3)
 
 (define-map proposals
   { proposal-id: uint }
@@ -23,7 +26,8 @@
     total-votes: uint,
     yes-votes: uint,
     no-votes: uint,
-    status: (string-ascii 20)
+    status: (string-ascii 20),
+    amendment-count: uint
   }
 )
 
@@ -40,6 +44,18 @@
 (define-map user-reputation
   principal
   { score: uint, proposals-created: uint, votes-cast: uint }
+)
+
+(define-map proposal-amendments
+  { proposal-id: uint, amendment-id: uint }
+  {
+    previous-title: (string-ascii 100),
+    previous-description: (string-ascii 500),
+    new-title: (string-ascii 100),
+    new-description: (string-ascii 500),
+    amended-at: uint,
+    amended-by: principal
+  }
 )
 
 (define-public (initialize-contract)
@@ -92,7 +108,8 @@
         total-votes: u0,
         yes-votes: u0,
         no-votes: u0,
-        status: "active"
+        status: "active",
+        amendment-count: u0
       }
     )
     
@@ -140,6 +157,57 @@
       )
       
       (ok true)
+    )
+  )
+)
+
+(define-public (amend-proposal
+  (proposal-id uint)
+  (new-title (string-ascii 100))
+  (new-description (string-ascii 500))
+)
+  (let
+    (
+      (proposal (map-get? proposals { proposal-id: proposal-id }))
+      (current-height burn-block-height)
+    )
+    (asserts! (is-some proposal) err-not-found)
+    
+    (let ((prop-data (unwrap-panic proposal)))
+      (asserts! (is-eq tx-sender (get proposer prop-data)) err-not-proposer)
+      (asserts! (< current-height (get voting-end prop-data)) err-voting-ended)
+      (asserts! (is-eq (get status prop-data) "active") err-voting-not-started)
+      (asserts! (> (len new-title) u0) err-invalid-proposal)
+      (asserts! (> (len new-description) u0) err-invalid-proposal)
+      
+      (let ((current-amendments (get amendment-count prop-data)))
+        (asserts! (< current-amendments (var-get max-amendments)) err-too-many-amendments)
+        
+        (map-set proposal-amendments
+          { proposal-id: proposal-id, amendment-id: (+ current-amendments u1) }
+          {
+            previous-title: (get title prop-data),
+            previous-description: (get description prop-data),
+            new-title: new-title,
+            new-description: new-description,
+            amended-at: current-height,
+            amended-by: tx-sender
+          }
+        )
+        
+        (map-set proposals
+          { proposal-id: proposal-id }
+          (merge prop-data
+            {
+              title: new-title,
+              description: new-description,
+              amendment-count: (+ current-amendments u1)
+            }
+          )
+        )
+        
+        (ok true)
+      )
     )
   )
 )
@@ -276,4 +344,19 @@
       )
     none
   )
+)
+
+(define-read-only (get-amendment (proposal-id uint) (amendment-id uint))
+  (map-get? proposal-amendments { proposal-id: proposal-id, amendment-id: amendment-id })
+)
+
+(define-read-only (get-amendment-count (proposal-id uint))
+  (match (map-get? proposals { proposal-id: proposal-id })
+    proposal-data (some (get amendment-count proposal-data))
+    none
+  )
+)
+
+(define-read-only (get-max-amendments)
+  (var-get max-amendments)
 )
